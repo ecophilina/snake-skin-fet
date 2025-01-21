@@ -1,3 +1,9 @@
+# data and outputs
+*.csv
+*.xlsx
+*.txt
+*.pdf
+
 # History files
 .Rhistory
 .Rapp.history
