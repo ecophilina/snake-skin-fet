@@ -1,0 +1,317 @@
+---
+title: "Snake skin presence with spatially-varying effect of year"
+author: "Philina English"
+date: "2025-01-17"
+# output: html_document
+output:
+  bookdown::pdf_document2:
+---
+
+```{r setup, include = FALSE, cache=FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.asp = 1.5,
+  out.width = "100%",
+  cache = FALSE,
+  autodep = TRUE,
+  cache.comments = FALSE
+)
+```
+
+# Setup
+
+```{r}
+library(here)
+library(readxl)
+library(tidyverse)
+library(sdmTMB)
+library(sf)
+library(patchwork)
+library(ggeffects)
+ggplot2::theme_set(ggsidekick::theme_sleek())
+```
+
+Load data and see what it looks like.
+
+```{r eval=TRUE, echo=TRUE, message=FALSE}
+d <- read_csv(here(paste0("output/all-snake-skin-data.csv")))
+glimpse(d)
+```
+
+
+```{r data,fig.asp = 0.5, out.width="100%"}
+ggplot(d) + geom_point(aes(longitude, latitude,
+    alpha = as.factor(present),
+    colour = common.name
+  ))
+ggplot(d) + geom_histogram(aes(year))
+round(mean(d$year))
+```
+
+# Generate spatial model
+
+For the spatial models and plotting we will use the Albers projection centered on North America.
+```{r}
+Albers <- "+proj=aea +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0
++datum=NAD83 +units=m +no_defs"
+```
+
+We add these projected UTMs to our data and build a mesh from them that will be used in our model.
+Using a minimum distance of 500 km given the sparse sampling in much of the continent. 
+
+```{r}
+d <- sdmTMB::add_utm_columns(d, utm_crs = Albers)
+mesh <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 500)
+plot(mesh)
+```
+
+This model includes all species, collector identity as a random intercept, and a linear scaled year effect that is allowed to vary in space.  Allowing anisotropy means that spatial correlations can be asymmetrical.
+
+```{r run-model, echo=TRUE, eval=FALSE}
+d$collector <- as.factor(d$collector)
+d$year_centered <- d$year - 1920
+d$year_scaled <- (d$year - 1920) / sd(d$year)
+d$year_sd <- sd(d$year)
+
+m <- sdmTMB(present ~ common.name + year_scaled + (1 | collector),
+  spatial = "on",
+  spatial_varying = ~year_scaled,
+  spatiotemporal = "off",
+  anisotropy = TRUE,
+  family = binomial(),
+  mesh = mesh2,
+  data = d
+)
+```
+
+```{r, eval=TRUE, echo=FALSE}
+d$collector <- as.factor(d$collector)
+d$year_centered <- d$year - 1920
+d$year_scaled <- (d$year - 1920) / sd(d$year)
+d$year_sd <- sd(d$year)
+
+m <- readRDS(here("output/model-svc.rds"))
+```
+
+```{r, message=TRUE, fig.asp = 0.5, out.width="50%"}
+m
+sanity(m)
+plot_anisotropy(m)
+```
+
+# Plotting main effects
+
+```{r main1, fig.asp = 0.5, out.width="70%"}
+ggeffects::ggeffect(m, "common.name") %>% 
+  ggplot(aes(x, predicted, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange() +
+  labs(y = "Probability snake skin present") +
+  theme(axis.title.x = element_blank())
+```
+
+```{r main2, fig.asp = 0.5, out.width="70%"}
+ggeffect(m, "year_scaled") %>% 
+  ggplot(aes(x, predicted, ymin = conf.low, ymax = conf.high)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.2) +
+  scale_x_continuous(labels= function(x) x*20 + 1920) +
+  labs(y = "Probability snake skin present") +
+  theme(axis.title.x = element_blank())
+```
+
+
+```{r, echo = FALSE,eval = FALSE, fig.asp = 0.5, out.width="100%"}
+# by hand
+nd <- data.frame(
+  common.name = "Bewick's Wren",
+  collector = as.factor("Not recorded"),
+  year_scaled = seq(min(m$data$year_scaled),
+    max(m$data$year_scaled),
+    length.out = 30
+  )
+)
+p <- predict(m, newdata = nd, se_fit = TRUE, re_form = NA)
+
+ggplot(p, aes((year_scaled*20 + 1920), plogis(est),
+  ymin = plogis(est - 1.96 * est_se),
+  ymax = plogis(est + 1.96 * est_se)
+)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.4) +
+  scale_x_continuous() +
+  coord_cartesian(expand = F) +
+  labs(x = "Year", y = "Probability present")
+```
+
+
+# Plotting spatial predictions
+
+To produce pretty maps of these predictions, back transform the spatial coordinates into the same units as our original projection and then convert back into an sf object so that the plot axis will be in latitude and longitude. 
+
+```{r proj-p}
+d_noyr <- m$data |> mutate(year_scaled = 0)
+pred <- predict(m, newdata = d_noyr, re_form_iid = NA)
+p <- pred %>% mutate(X = X * 1000, Y = Y * 1000)
+p_proj <- p %>%
+  mutate(x = X, y = Y) %>%
+  sf::st_as_sf(coords = c("x", "y"), crs = Albers)
+```
+
+We can retrieve continental coastlines from the package rnaturalearth and outlines of the great lakes from <https://www.naturalearthdata.com/downloads/110m-physical-vectors/> and transform them to the correct projection. 
+
+```{r shapes}
+coast <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf") %>%
+  sf::st_transform(crs = Albers)
+lakes <- sf::st_read(here::here("data/ne_110m_lakes"), quiet = TRUE)
+lakes <- lakes[lakes$scalerank == 0, ] %>% sf::st_transform(crs = Albers) # only large lakes
+```
+
+
+## Predicted probability present by species
+
+```{r plot-fixed-effects, echo=TRUE, eval=TRUE, cache=FALSE, fig.asp = 1.5, out.width="100%"}
+ggplot(data = filter(p_proj, year > 1978)) +
+  geom_sf(data = coast, colour = "gray50") +
+  geom_sf(data = lakes, colour = "gray50", fill = NA) +
+  coord_sf(
+    xlim = c(min(p_proj$X) - 50000, max(p_proj$X) - 50000),
+    ylim = c(min(p_proj$Y), max(p_proj$Y))
+  ) +
+  geom_point(
+    data = p, aes(X, Y, colour = plogis(est)),
+    alpha = 0.75,
+    size = 2
+  ) +
+  scale_colour_viridis_c(
+    guide = guide_colourbar(title.position = "top")
+  ) +
+  labs(colour = "Probability \npresent") +
+  theme(axis.title = element_blank()) +
+  facet_wrap(~common.name, ncol = 1)
+```
+
+### Static spatial random effects 
+
+We can look at the spatial random effects (`omega_s`) that represent consistent deviations in space that are not accounted for by our fixed effects. 
+
+```{r plot-spatial-effects, echo=TRUE, eval=TRUE, cache=FALSE, out.width="95%"}
+ggplot(data = p_proj) +
+  geom_point(data = p, aes(X, Y, colour = omega_s), size = 2, alpha = 0.75) +
+  geom_sf(data = coast, colour = "gray50") +
+  geom_sf(data = lakes, colour = "gray50", fill = NA) +
+  coord_sf(
+    xlim = c(min(p_proj$X) - 50000, max(p_proj$X) - 50000),
+    ylim = c(min(p_proj$Y), max(p_proj$Y))
+  ) +
+  scale_colour_viridis_c(guide = guide_colourbar(
+    direction = "horizontal", title.position = "top"
+  )) +
+  labs(colour = "Spatial effect (omega_s)") +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.4, 0.8), axis.title = element_blank()
+  )
+```
+
+
+## Spatially varying effect of year
+
+We can extract the overall coefficients using the `b <- tidy(m)` and add them together with the spatially varying coefficients `zeta_s`.
+However, this method does not give us spatially explicit estimates of uncertainty.
+To do this, we can get the output from the joint precision matrix simulation draws by using the `predict()` function again, but this time indicating a number of simulation draws (e.g., `sims = 500`) and what component we want estimated (`sims_var = "zeta_s"`). 
+We also extract the same number of draws for estimates of the main effect using the `spread_sims()` function (this time `n_sims = 500`). 
+The simulation draws for both can then be combined before calculating the median and lower and upper quantiles from these draws and adding these values to our predicted data.
+
+
+```{r p-mean, message=FALSE, echo=TRUE, eval=TRUE}
+b <- tidy(m, conf.int = TRUE)
+
+n_sims <- 500L
+zeta_sim <- predict(m, nsim = n_sims, sims_var = "zeta_s")
+sims <- spread_sims(m, nsim = n_sims)
+beta <- sims$year_scaled
+# combined <- beta + t(zeta_sim) # link space
+combined <- plogis(b$estimate[1] + beta + t(zeta_sim)) # natural space scaled to Bewick's
+p$zeta_sim <- apply(t(zeta_sim), 2, median)
+p$year_scaled_sim <- apply(combined, 2, median)
+p$year_scaled_lwr <- apply(combined, 2, quantile, probs = 0.025)
+p$year_scaled_upr <- apply(combined, 2, quantile, probs = 0.975)
+```
+
+
+```{r plot-map, echo=TRUE, eval=TRUE, out.width="95%", cache=FALSE}
+ggplot(data = p_proj) +
+  geom_point(
+    data = p, aes(X, Y, colour = year_scaled_sim), alpha = 0.75
+  ) +
+  geom_sf(data = coast, colour = "gray50") +
+  geom_sf(data = lakes, colour = "gray50", fill = NA) +
+  coord_sf(
+    xlim = c(min(p_proj$X) - 50000, max(p_proj$X) - 50000), # adjusts space on sides
+    ylim = c(min(p_proj$Y), max(p_proj$Y))
+  ) +
+  scale_colour_viridis_c(
+    limit = c(min(p$year_scaled_lwr), max(p$year_scaled_upr)),
+    guide = guide_colourbar(direction = "horizontal", title.position = "top")
+  ) +
+  guides(size = "none") +
+  # labs(colour = "Estimated effect in link space") +
+  labs(colour = "Estimated change over 20 years") +
+  ggtitle("Map of combined main and spatially varying effects of year for Bewick's Wren") +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.4, 0.87), axis.title = element_blank()
+  )
+```
+
+```{r plot-map-ci, echo=F, eval=TRUE, out.width="100%", cache=FALSE}
+p1 <- ggplot(data = p_proj) +
+  geom_point(
+    data = p,
+    aes(X, Y, colour = year_scaled_lwr), alpha = 0.75
+  ) +
+  geom_sf(data = coast, colour = "gray50") +
+  geom_sf(data = lakes, colour = "gray50", fill = NA) +
+  coord_sf(
+    xlim = c(min(p_proj$X) - 50000, max(p_proj$X) - 50000), # adjusts space on sides
+    ylim = c(min(p_proj$Y), max(p_proj$Y))
+  ) +
+  scale_colour_viridis_c(
+    limit = c(min(p$year_scaled_lwr), max(p$year_scaled_upr)),
+    guide = guide_colourbar(direction = "horizontal", title.position = "top")
+  ) +
+  guides(size = "none", colour = "none") +
+  ggtitle("Lower 95% CI") +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.1), axis.title = element_blank()
+  )
+
+p2 <- ggplot(data = p_proj) +
+  geom_point(
+    data = p,
+    aes(X, Y, colour = year_scaled_upr), alpha = 0.5
+  ) +
+  geom_sf(data = coast, colour = "gray50") +
+  geom_sf(data = lakes, colour = "gray50", fill = NA) +
+  coord_sf(
+    xlim = c(min(p_proj$X) - 50000, max(p_proj$X) - 50000), # adjusts space on sides
+    ylim = c(min(p_proj$Y), max(p_proj$Y))
+  ) +
+  scale_colour_viridis_c(
+    limit = c(min(p$year_scaled_lwr), max(p$year_scaled_upr)),
+    guide = guide_colourbar(direction = "horizontal", title.position = "top")
+  ) +
+  guides(size = "none", colour = "none") +
+  ggtitle("Upper 95% CI") +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.1, 0.1), axis.title = element_blank()
+  )
+
+p1 + p2 + patchwork::plot_layout()
+```
+
