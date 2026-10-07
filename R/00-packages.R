@@ -4,6 +4,7 @@ if(!require(tidyverse))install.packages("tidyverse")
 if(!require(sdmTMB))install.packages("sdmTMB", dependencies = TRUE)
 if(!require(patchwork))install.packages("patchwork")
 if(!require(here))install.packages("here")
+if(!require(readr))install.packages("readr")
 if(!require(readxl))install.packages("readxl")
 if(!require(sf))install.packages("sf")
 
