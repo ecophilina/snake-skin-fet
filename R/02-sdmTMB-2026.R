@@ -117,8 +117,6 @@ tidy(m, effects = "ran_pars", conf.int = TRUE)
 # look for temporal change
 # add back museums with few samples
 
-d <- d
-
 mesh3 <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 80)
 
 plot(mesh3)
@@ -261,6 +259,115 @@ AIC(svc_full, svc, m_time, m_time2, m_no_time)
 # m_time    14 2833.605
 # m_time2   11 2852.982
 # m_no_time 11 2854.959
+mean(d$latitude) #~35 degrees
+sd(d$latitude) # ~ 5 degrees
+
+mean(d$longitude) #~-95 degrees
+sd(d$longitude) # ~ 16 degrees
+
+
+d$lat_scaled<- (d$latitude - 35)/ 5
+d$lon_scaled<- (d$longitude - -95)/ 16
+
+
+d <- d |>
+  mutate(common.name = relevel(factor(common.name), ref = "Great-crested Flycatcher"))
+
+mesh <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 50)
+plot(mesh)
+
+
+mns <- sdmTMB(present~ common.name*year_scaled + common.name*lat_scaled  + common.name*lon_scaled + card.photo,
+              time = "common.name",
+              spatial = "on",
+              # spatiotemporal = "iid",
+              spatiotemporal = "off",
+              # spatial_varying = ~year_scaled,
+              share_range = FALSE,
+              anisotropy = TRUE,
+              family = binomial(),
+              mesh = mesh,
+              data = d
+)
+
+mns <- sdmTMB(present~ common.name*year_scaled + lat_scaled  + common.name*lon_scaled + card.photo,
+              time = "common.name",
+              spatial = "on",
+              spatiotemporal = "iid",
+              # spatiotemporal = "off",
+              # spatial_varying = ~year_scaled,
+              share_range = FALSE,
+              anisotropy = TRUE,
+              family = binomial(),
+              mesh = mesh,
+              data = d
+)
+
+
+mns <- sdmTMB(present~common.name*year_scaled + lat_scaled + card.photo,
+              time = "common.name",
+              spatial = "off",
+              spatiotemporal = "iid",
+              # spatial_varying = ~year_scaled,
+              share_range = FALSE,
+              anisotropy = TRUE,
+              family = binomial(),
+              mesh = mesh,
+              data = d
+)
+
+
+
+sanity(mns)
+plot_anisotropy(mns)
+mns
+
+tidy(mns, conf.int = TRUE)
+tidy(mns, effects = "ran_pars", conf.int = TRUE)
+
+saveRDS(mns, "output/model-mns.rds")
+
+MuMIn::AICc(mns, svc)
+
+### filter out photos #####
+
+d_card <- filter(d, card.photo != "photo") |>
+  mutate(common.name = relevel(factor(common.name), ref = "Great-crested Flycatcher"))
+
+mesh_card <- make_mesh(d_card, xy_cols = c("X", "Y"), cutoff = 25)
+plot(mesh_card)
+
+mcard <- sdmTMB(present~ common.name*year_scaled + common.name*lat_scaled + common.name*lon_scaled,
+              time = "common.name",
+              spatial = "on",
+              # spatiotemporal = "iid",
+              spatiotemporal = "off",
+              # spatial_varying = ~year_scaled,
+              share_range = FALSE,
+              anisotropy = TRUE,
+              family = binomial(),
+              mesh = mesh_card,
+              data = d_card
+)
+
+
+sanity(mcard)
+plot_anisotropy(mcard)
+mcard
+
+tidy(mcard, conf.int = TRUE)
+tidy(mcard, effects = "ran_pars", conf.int = TRUE)
+
+ggeffects::ggeffect(mcard, terms =c("year_scaled", "common.name")) %>% 
+  ggplot(aes(x, predicted, fill = group)) +
+  geom_line(aes(colour = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2) +
+  scale_x_continuous(labels= function(x) x*50 + 1925) +
+  labs(y = "Probability snake skin present", colour ="", fill = "") +
+  theme(axis.title.x = element_blank())
+
+
+saveRDS(mcard, "output/model-no-photos.rds")
 
 
 ## add code for QQ plots
